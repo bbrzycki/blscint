@@ -1,6 +1,5 @@
 import numpy as np 
 import pandas as pd
-import sklearn.metrics
 import seaborn as sns 
 import scipy.stats
 import matplotlib.pyplot as plt
@@ -93,6 +92,8 @@ class BaseSyntheticDistRanker():
         plt.legend()
 
     def plot_confusion_matrix(self, title=False):
+        import sklearn.metrics
+
         y_true = np.empty(0)
         y_pred = np.empty(0)
         for i in range(len(self.t_ds)):

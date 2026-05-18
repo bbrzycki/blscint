@@ -1,11 +1,42 @@
+"""Coles-style multi-screen scattering simulation.
+
+Primary reference
+-----------------
+Coles, W. A., Rickett, B. J., Gao, J. J., Hobbs, G., & Verbiest, J. P. W.
+2010, "Scattering of pulsar radio emission by the interstellar plasma",
+The Astrophysical Journal, 717, 1206-1221. doi:10.1088/0004-637X/717/2/1206
+
+The 2010 paper points back to Coles et al. 1995a for implementation details;
+the current filename is kept for compatibility with the original scratch work.
+
+Equation map
+------------
+* Phase structure function ``D(s) = (s / s0)**alpha`` follows Coles et al.
+  2010 Section 3.
+* ``m_b2`` follows the Born scintillation-strength definition in Coles et al.
+  2010 Section 3.
+* ``s0`` is derived from the paper's relation between ``m_b2`` and
+  ``D(r_F)``.
+* Free-space propagation uses the FFT angular-spectrum/Fresnel approach
+  described in Coles et al. 2010 Section 2 and implemented with the Li et al.
+  2007 transfer-function helper in ``hl07``.
+"""
+
 import numpy as np 
 import scipy.special
 from astropy import units as u
-from astropy.constants import a0, alpha
 import setigen as stg
-from tqdm import tqdm
 
-from .base_classes import get_k, get_rF, BaseRadioSource, BasePhaseSpectrum, BaseScreen, BaseScatteringModel
+from . import hl07
+from .base_classes import (
+    get_k,
+    get_rF,
+    make_observer_dynamic_spectrum,
+    BaseRadioSource,
+    BasePhaseSpectrum,
+    BaseScreen,
+    BaseScatteringModel,
+)
 
 
 def f_l0(x):
@@ -111,15 +142,16 @@ class Screen(BaseScreen):
         self.noise = self.rng.standard_normal(size=self.shape) + 1j * self.rng.standard_normal(size=self.shape)
 
     def phases(self, f):
-        var_pq = (self.spectrum.Phi(self.q_mag, f)
-                * 4 * np.pi**2 * self.Nx * self.Ny / (self.dx * self.dy))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            var_pq = (self.spectrum.Phi(self.q_mag, f)
+                    * 4 * np.pi**2 * self.Nx * self.Ny / (self.dx * self.dy))
         var_pq[self.Ny//2, self.Nx//2] = 0
 
         var_pq = np.fft.fftshift(var_pq)
 
         phi_pq = self.noise * var_pq**0.5
         
-        phi_mn = np.fft.ifft(phi_pq).real
+        phi_mn = np.fft.ifft2(phi_pq).real
         return phi_mn
 
     def propagate_phase_screen(self, E, f):
@@ -128,7 +160,7 @@ class Screen(BaseScreen):
     def propagate_free_space(self, E, z, f):
         if isinstance(E, (int, float)):
             E = np.full(self.shape, E)
-        E = np.fft.ifft2(np.fft.fft2(E) * np.exp(-1j * self.q_mag**2 * z / (2 * get_k(f))))
+        E = np.fft.ifft2(np.fft.fft2(E) * hl07.fresnel_transfer_function(self.q_mag, z, f))
         return E
     
 
@@ -157,7 +189,7 @@ class ScatteringModel(BaseScatteringModel):
     def propagate_free_space(self, E, z, f):
         if isinstance(E, (int, float)):
             E = np.full(self.shape, E)
-        E = np.fft.ifft2(np.fft.fft2(E) * np.exp(-1j * self.q_mag**2 * z / (2 * get_k(f))))
+        E = np.fft.ifft2(np.fft.fft2(E) * hl07.fresnel_transfer_function(self.q_mag, z, f))
         return E
             
     def observer_electric_field(self, f):
@@ -172,12 +204,24 @@ class ScatteringModel(BaseScatteringModel):
         E = self.propagate_free_space(E, self.screens[-1].distance, f)
         return E
 
+    def observer_dynamic_spectrum_result(self, fmin, df, fchans, v_trans=None,
+                                         normalize=None, progress=True):
+        return make_observer_dynamic_spectrum(
+            self,
+            fmin=fmin,
+            df=df,
+            fchans=fchans,
+            sample_count=self.Nx,
+            sample_spacing=self.dx,
+            row_index=self.Ny // 2,
+            v_trans=v_trans,
+            normalize=normalize,
+            progress=progress,
+            metadata={
+                "model": "c95",
+                "axis_order": "(observer_plane_x, frequency)",
+            },
+        )
+
     def observer_dynamic_spectrum(self, fmin, df, fchans):
-        # Should include v_T here to go from spatial to temporal units
-        spectrum = np.zeros((self.Nx, fchans), dtype=np.complex_)
-        idx_c = self.Ny // 2
-        for idx in tqdm(np.arange(fchans)):
-            spectrum[:, idx] = self.observer_electric_field(fmin + df * idx)[idx_c]
-        return np.abs(spectrum)**2
-
-
+        return self.observer_dynamic_spectrum_result(fmin, df, fchans).intensity

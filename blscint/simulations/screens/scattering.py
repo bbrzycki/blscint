@@ -1,3 +1,11 @@
+"""Legacy scratch implementation of the Coles-style screen model.
+
+This file predates ``c95.py`` and largely duplicates that implementation.  New
+work should target ``c95.py`` plus the shared helpers in ``base_classes.py`` and
+``hl07.py``.  The file is left in place for notebook compatibility until the
+old experiments can be migrated or deleted deliberately.
+"""
+
 import numpy as np 
 import scipy.special
 from astropy import units as u

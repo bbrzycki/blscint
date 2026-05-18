@@ -1,13 +1,38 @@
+"""Ravi & Deshpande thin-screen DISS simulation.
+
+Reference
+---------
+Ravi, K., & Deshpande, A. A. 2018, "Scintillation-based Search for
+Off-pulse Radio Emission from Pulsars", The Astrophysical Journal, 859, 22.
+doi:10.3847/1538-4357/aab60d
+
+This module follows Appendix B of Ravi & Deshpande 2018:
+
+* Eq. B1: 3-D power-law electron-density spectrum.
+* Eq. B2: equivalent 2-D phase-screen spectrum.
+* Eq. B4: FFT-based random phase-screen synthesis.
+* Eq. B5-B8: phase-screen field and observer-plane intensity.
+
+Although the paper is pulsar-motivated, the dynamic spectrum itself is the
+piece we want for technosignature propagation: a frequency-dependent intensity
+gain pattern that can be sampled spatially or converted to time with a
+transverse velocity.
+"""
+
 import numpy as np 
-import scipy.special
 from astropy import units as u
 from astropy.constants import a0, alpha
 r_e = a0 * alpha**2
 
-import setigen as stg
-from tqdm import tqdm
-
-from .base_classes import get_wavelength, get_k, get_rF, BaseRadioSource, BasePhaseSpectrum, BaseScreen, BaseScatteringModel
+from .base_classes import (
+    get_wavelength,
+    get_k,
+    make_observer_dynamic_spectrum,
+    BaseRadioSource,
+    BasePhaseSpectrum,
+    BaseScreen,
+    BaseScatteringModel,
+)
 
 
 class RadioSource(BaseRadioSource):
@@ -72,37 +97,21 @@ class Screen(BaseScreen):
         self.random_field_component = self.random_field_noise()
 
     def random_field_noise(self):
-        
-        # M = rng.standard_normal(self.shape) + 1j * rng.standard_normal(self.shape)
-        
-        M = self.rng.uniform(0, 2*np.pi, self.shape)
-        M[self.Nc, self.Nc] = 0
-        for i in range(0, self.N):
-            for j in range(self.Nc, self.N):
-                try:
-                    if j == self.Nc and i >= self.Nc:
-                        M[i, j] = -M[2*self.Nc-i, 2*self.Nc-j]
-                    else:
-                        M[i, j] = -M[2*self.Nc-i, 2*self.Nc-j]
-                except IndexError:
-                    # Outside matrix 
-                    pass
-
-        # g = np.fft.fft2(M)
-        g = np.exp(-1j*M)
+        """Return the bracketed FFT component in Ravi & Deshpande Eq. B4."""
+        M = self.rng.standard_normal(self.shape) + 1j * self.rng.standard_normal(self.shape)
+        g = np.fft.ifft2(M)
         
         with np.errstate(divide='ignore'):
             M0 = ((self.ii - self.Nc)**2 + (self.jj - self.Nc)**2)**(-self.spectrum.beta/4)
             M0[int(self.Nc), int(self.Nc)] = 0
-        return np.fft.fft2(g * M0)
+        return np.fft.ifft2(g * M0)
 
     def phases(self, f):
         C0 = 2 * np.pi * (2 * np.pi)**(-self.spectrum.beta / 2)
         C1 = (self.N * self.dr)**(-1 + self.spectrum.beta / 2)
         C2 = (2 * np.pi * self.dz * (get_wavelength(f) * r_e)**2 * self.spectrum.C_n2)**0.5
         phi = C0 * C1 * C2 * self.random_field_component
-        # phi = phi.real
-        return phi
+        return phi.real
 
     def propagate_phase_screen(self, E, f):
         return E * np.exp(-1j * self.phases(f))
@@ -170,11 +179,24 @@ class ScatteringModel(BaseScatteringModel):
         E = self.propagate_free_space(E, self.screens[-1].distance, f)
         return E
 
+    def observer_dynamic_spectrum_result(self, fmin, df, fchans, v_trans=None,
+                                         normalize=None, progress=True):
+        return make_observer_dynamic_spectrum(
+            self,
+            fmin=fmin,
+            df=df,
+            fchans=fchans,
+            sample_count=self.N,
+            sample_spacing=self.dr,
+            row_index=self.Nc,
+            v_trans=v_trans,
+            normalize=normalize,
+            progress=progress,
+            metadata={
+                "model": "rd18",
+                "axis_order": "(observer_plane_r, frequency)",
+            },
+        )
+
     def observer_dynamic_spectrum(self, fmin, df, fchans):
-        # Should include v_T here to go from spatial to temporal units
-        spectrum = np.zeros((self.N, fchans), dtype=np.complex_)
-        for idx in tqdm(np.arange(fchans)):
-            spectrum[:, idx] = self.observer_electric_field(fmin + df * idx)[self.Nc]
-        return np.abs(spectrum)**2
-
-
+        return self.observer_dynamic_spectrum_result(fmin, df, fchans).intensity
