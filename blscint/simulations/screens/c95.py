@@ -9,6 +9,15 @@ The Astrophysical Journal, 717, 1206-1221. doi:10.1088/0004-637X/717/2/1206
 The 2010 paper points back to Coles et al. 1995a for implementation details;
 the current filename is kept for compatibility with the original scratch work.
 
+Methodology role
+----------------
+This is the primary numerical validation path for the shared screen backend.
+The code uses Coles-style scattering-strength parameters and structure-function
+normalization, then delegates the actual random phase-screen realization to
+``power_law.PowerLawPhaseScreen``.  Other paper-facing wrappers should match
+this module only when they request the same phase spectrum and use the same
+propagation conventions.
+
 Equation map
 ------------
 * Phase structure function ``D(s) = (s / s0)**alpha`` follows Coles et al.
@@ -23,27 +32,26 @@ Equation map
 """
 
 import numpy as np 
-import scipy.special
-from astropy import units as u
-import setigen as stg
 
 from . import hl07
 from .base_classes import (
-    get_k,
-    get_rF,
+    make_narrowband_tone_field,
+    make_narrowband_tone_profile,
     make_observer_dynamic_spectrum,
     BaseRadioSource,
     BasePhaseSpectrum,
     BaseScreen,
     BaseScatteringModel,
 )
+from .power_law import (
+    PowerLawPhaseScreen,
+    ScatteringStrengthSpectrum,
+    inner_scale_taper,
+)
 
 
 def f_l0(x):
-    a1 = 1.4284
-    a2 = 1.1987 
-    a3 = 0.1414
-    return (1 + a1*x + a2*x**2 + a3*x**3) * np.exp(-x)
+    return inner_scale_taper(x)
 
 
 class RadioSource(BaseRadioSource):
@@ -54,56 +62,22 @@ class RadioSource(BaseRadioSource):
         return 1
 
 
-class PhaseSpectrum(BasePhaseSpectrum):
+class PhaseSpectrum(ScatteringStrengthSpectrum, BasePhaseSpectrum):
     def __init__(self, 
                  m_b2=None,
-                #  C_n2=None,
+                 s0=None,
                  l0=0,
                  alpha=5/3,
                  distance=None,
                  dz=None):
-        self.dz = dz 
-        self.distance = distance
-
-        self.alpha = alpha
-        self.l0 = stg.cast_value(l0, u.cm)
-        self.K1 = 2**alpha * scipy.special.gamma(1 + alpha / 2) * np.cos(alpha * np.pi / 4)
-        self.A = scipy.special.gamma(1 + alpha) * np.sin((alpha - 1) * np.pi / 2) / (4 * np.pi**2)
-        # if m_b2 is None:
-        #     if C_n2 is None:
-        #         raise ValueError("Only set one of m_b2 or C_n2")
-        #     self.C_n2 = C_n2
-        # else:
-        #     if m_b2 is None:
-        #         raise ValueError("Only set one of m_b2 or C_n2")
-        self.m_b2 = m_b2
-
-    def _T_factor(self, f):
-        """
-        Factor K so that T = K * C_n2.
-        """
-        return 2 * np.pi * get_k(f)**2 * self.A * self.dz
-
-    def C_n2(self, f):
-        return self.m_b2 / (4 * np.pi * self._T_factor(f) 
-                            * scipy.special.gamma(1 - self.alpha / 2) 
-                            * np.cos(self.alpha * np.pi / 4) 
-                            * get_rF(self.distance, f)**self.alpha / self.alpha)
-
-    def T(self, f):
-        return self._T_factor(f) * self.C_n2(f)
-
-    def s0(self, f):
-        """
-        Eq. 15 & 17.
-        """
-        return (self.m_b2 / self.K1)**(-1/self.alpha) * get_rF(self.distance, f)
-
-    def D_TS(self, s, f):
-        return (s / self.s0(f))**(self.alpha)
-
-    def Phi(self, q, f):
-        return self.T(f) * q**(-self.alpha - 2) * f_l0(q * self.l0)
+        super().__init__(
+            m_b2=m_b2,
+            s0=s0,
+            l0=l0,
+            alpha=alpha,
+            distance=distance,
+            dz=dz,
+        )
 
 
 class Screen(BaseScreen):
@@ -115,13 +89,17 @@ class Screen(BaseScreen):
                  shape=(16, 16), 
                  alpha=5/3,
                  m_b2=None,
-                #  C_n2=None,
+                 s0=None,
                  l0=0,
+                 subharmonic_levels=0,
+                 normalize_structure=True,
+                 phase_sign=1,
                  seed=None):
         self.rng = np.random.default_rng(seed)
         self.distance = distance 
         self.dz = dz
         self.shape = shape
+        self.phase_sign = phase_sign
         self.Ny, self.Nx = self.shape 
         self.dx, self.dy = dx, dy
         self.Ly, self.Lx = self.Ny * self.dy, self.Nx * self.dx 
@@ -133,29 +111,32 @@ class Screen(BaseScreen):
 
         # Set up phase spectrum
         self.spectrum = PhaseSpectrum(m_b2=m_b2,
-                                    #   C_n2=C_n2,
+                                      s0=s0,
                                       l0=l0,
                                       alpha=alpha,
                                       distance=distance,
                                       dz=dz)
 
-        self.noise = self.rng.standard_normal(size=self.shape) + 1j * self.rng.standard_normal(size=self.shape)
+        self.normalize_structure = normalize_structure
+        self.phase_screen = PowerLawPhaseScreen(
+            shape=self.shape,
+            dx=self.dx,
+            dy=self.dy,
+            seed=seed,
+            subharmonic_levels=subharmonic_levels,
+        )
 
     def phases(self, f):
-        with np.errstate(divide="ignore", invalid="ignore"):
-            var_pq = (self.spectrum.Phi(self.q_mag, f)
-                    * 4 * np.pi**2 * self.Nx * self.Ny / (self.dx * self.dy))
-        var_pq[self.Ny//2, self.Nx//2] = 0
-
-        var_pq = np.fft.fftshift(var_pq)
-
-        phi_pq = self.noise * var_pq**0.5
-        
-        phi_mn = np.fft.ifft2(phi_pq).real
-        return phi_mn
+        reference_scale = self.spectrum.s0(f) if self.normalize_structure else None
+        return self.phase_screen.phases(
+            self.spectrum,
+            f,
+            reference_scale=reference_scale,
+            reference_dphi=1.0,
+        )
 
     def propagate_phase_screen(self, E, f):
-        return E * np.exp(1j * self.phases(f))
+        return E * np.exp(1j * self.phase_sign * self.phases(f))
 
     def propagate_free_space(self, E, z, f):
         if isinstance(E, (int, float)):
@@ -225,3 +206,34 @@ class ScatteringModel(BaseScatteringModel):
 
     def observer_dynamic_spectrum(self, fmin, df, fchans):
         return self.observer_dynamic_spectrum_result(fmin, df, fchans).intensity
+
+    def observer_narrowband_tone_field(self, frequency, v_trans=None):
+        return make_narrowband_tone_field(
+            self,
+            frequency=frequency,
+            sample_count=self.Nx,
+            sample_spacing=self.dx,
+            row_index=self.Ny // 2,
+            v_trans=v_trans,
+            metadata={
+                "model": "c95",
+                "axis_order": "(observer_plane_x, tone_frequency)",
+            },
+        )
+
+    def observer_narrowband_tone_profile(self, frequency, intrinsic_intensity=1.0,
+                                         v_trans=None, normalize=None):
+        return make_narrowband_tone_profile(
+            self,
+            frequency=frequency,
+            sample_count=self.Nx,
+            sample_spacing=self.dx,
+            row_index=self.Ny // 2,
+            intrinsic_intensity=intrinsic_intensity,
+            v_trans=v_trans,
+            normalize=normalize,
+            metadata={
+                "model": "c95",
+                "axis_order": "(observer_plane_x, tone_frequency)",
+            },
+        )

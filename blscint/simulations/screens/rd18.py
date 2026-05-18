@@ -6,12 +6,22 @@ Ravi, K., & Deshpande, A. A. 2018, "Scintillation-based Search for
 Off-pulse Radio Emission from Pulsars", The Astrophysical Journal, 859, 22.
 doi:10.3847/1538-4357/aab60d
 
-This module follows Appendix B of Ravi & Deshpande 2018:
+Methodology role
+----------------
+This module is an RD18-facing adapter over the shared screen backend.  It keeps
+the Appendix B physical normalization route from ``C_n2`` to the 2-D phase
+spectrum and preserves the RD18 default phase-sign convention.  It should not
+be read as an independent line-by-line reproduction of the RD18 discrete
+simulation.
+
+Appendix B correspondence:
 
 * Eq. B1: 3-D power-law electron-density spectrum.
 * Eq. B2: equivalent 2-D phase-screen spectrum.
-* Eq. B4: FFT-based random phase-screen synthesis.
-* Eq. B5-B8: phase-screen field and observer-plane intensity.
+* Eq. B4: represented by the shared FFT phase-screen synthesis in
+  ``power_law.PowerLawPhaseScreen``.
+* Eq. B5-B8: represented by the shared phase-screen and Fresnel
+  transfer-function propagation path used by the other wrappers.
 
 Although the paper is pulsar-motivated, the dynamic spectrum itself is the
 piece we want for technosignature propagation: a frequency-dependent intensity
@@ -21,17 +31,23 @@ transverse velocity.
 
 import numpy as np 
 from astropy import units as u
-from astropy.constants import a0, alpha
-r_e = a0 * alpha**2
 
+from . import hl07
 from .base_classes import (
     get_wavelength,
     get_k,
+    make_narrowband_tone_field,
+    make_narrowband_tone_profile,
     make_observer_dynamic_spectrum,
     BaseRadioSource,
     BasePhaseSpectrum,
     BaseScreen,
     BaseScatteringModel,
+)
+from .power_law import (
+    PowerLawPhaseScreen,
+    ScatteringStrengthSpectrum,
+    ThinScreenSpectrum,
 )
 
 
@@ -43,22 +59,13 @@ class RadioSource(BaseRadioSource):
         return 1
 
 
-class PhaseSpectrum(BasePhaseSpectrum):
+class PhaseSpectrum(ThinScreenSpectrum, BasePhaseSpectrum):
     def __init__(self, 
                  C_n2=None,
                  alpha=5/3,
                  distance=None,
                  dz=None):
-        self.dz = dz 
-        self.distance = distance
-
-        self.alpha = alpha
-        self.beta = self.alpha + 2
-        
-        self.C_n2 = C_n2
-
-    def Phi(self, q, f):
-        return 2 * np.pi * self.dz * (get_wavelength(f) * r_e)**2 * self.C_n2 * q**(-self.beta)
+        super().__init__(C_n2=C_n2, alpha=alpha, distance=distance, dz=dz)
 
 
 class Screen(BaseScreen):
@@ -69,6 +76,12 @@ class Screen(BaseScreen):
                  dz, 
                  alpha=5/3,
                  C_n2=None,
+                 m_b2=None,
+                 s0=None,
+                 l0=0,
+                 subharmonic_levels=0,
+                 normalize_structure=None,
+                 phase_sign=-1,
                  seed=None):
         self.rng = np.random.default_rng(seed)
         self.distance = distance 
@@ -76,6 +89,7 @@ class Screen(BaseScreen):
         self.N = N
         self.Nc = self.N // 2
         self.dr = dr
+        self.phase_sign = phase_sign
         self.shape = (N, N)
         self.Ny, self.Nx = self.shape 
         self.dx, self.dy = dr, dr
@@ -88,44 +102,65 @@ class Screen(BaseScreen):
 
         self.jj, self.ii = np.meshgrid(np.arange(self.N), np.arange(self.N))
 
-        # Set up phase spectrum
-        self.spectrum = PhaseSpectrum(C_n2=C_n2,
-                                      alpha=alpha,
-                                      distance=distance,
-                                      dz=dz)
+        if m_b2 is not None or s0 is not None:
+            self.spectrum = ScatteringStrengthSpectrum(
+                m_b2=m_b2,
+                s0=s0,
+                l0=l0,
+                alpha=alpha,
+                distance=distance,
+                dz=dz,
+            )
+            self.normalize_structure = True if normalize_structure is None else normalize_structure
+        else:
+            self.spectrum = PhaseSpectrum(C_n2=C_n2,
+                                          alpha=alpha,
+                                          distance=distance,
+                                          dz=dz)
+            self.normalize_structure = False if normalize_structure is None else normalize_structure
 
-        self.random_field_component = self.random_field_noise()
+        self.phase_screen = PowerLawPhaseScreen(
+            shape=self.shape,
+            dx=self.dr,
+            dy=self.dr,
+            seed=seed,
+            subharmonic_levels=subharmonic_levels,
+        )
 
     def random_field_noise(self):
-        """Return the bracketed FFT component in Ravi & Deshpande Eq. B4."""
-        M = self.rng.standard_normal(self.shape) + 1j * self.rng.standard_normal(self.shape)
-        g = np.fft.ifft2(M)
-        
-        with np.errstate(divide='ignore'):
-            M0 = ((self.ii - self.Nc)**2 + (self.jj - self.Nc)**2)**(-self.spectrum.beta/4)
-            M0[int(self.Nc), int(self.Nc)] = 0
-        return np.fft.ifft2(g * M0)
+        """Return a screen realization without frequency-dependent scaling."""
+        return self.phase_screen._base_phases(self.spectrum, 1 * u.Hz)
 
     def phases(self, f):
-        C0 = 2 * np.pi * (2 * np.pi)**(-self.spectrum.beta / 2)
-        C1 = (self.N * self.dr)**(-1 + self.spectrum.beta / 2)
-        C2 = (2 * np.pi * self.dz * (get_wavelength(f) * r_e)**2 * self.spectrum.C_n2)**0.5
-        phi = C0 * C1 * C2 * self.random_field_component
-        return phi.real
+        reference_scale = None
+        if self.normalize_structure and hasattr(self.spectrum, "s0"):
+            reference_scale = self.spectrum.s0(f)
+        return self.phase_screen.phases(
+            self.spectrum,
+            f,
+            reference_scale=reference_scale,
+            reference_dphi=1.0,
+        )
 
     def propagate_phase_screen(self, E, f):
-        return E * np.exp(-1j * self.phases(f))
+        return E * np.exp(1j * self.phase_sign * self.phases(f))
 
     def propagate_free_space(self, E, z, f):
         if isinstance(E, (int, float)):
             E = np.full(self.shape, E)
-        
+
+        E = np.fft.ifft2(np.fft.fft2(E) * hl07.fresnel_transfer_function(self.q_mag, z, f))
+        return E
+
+    def propagate_free_space_impulse(self, E, z, f):
+        if isinstance(E, (int, float)):
+            E = np.full(self.shape, E)
+
         k = get_k(f)
         xx, yy = self.dr * (self.jj - self.Nc, self.ii - self.Nc)
-        # xx, yy = dr * (jj, ii)
         h = np.exp(1j*k*z)/(1j*get_wavelength(f)*z)*np.exp(1j*k/(2*z)*(xx**2+yy**2))
 
-        E = np.fft.ifft2(np.fft.fft2(E) * np.fft.fft2(h))
+        E = np.fft.ifft2(np.fft.fft2(E) * np.fft.fft2(h)) * self.dr**2
         return E
     
 
@@ -158,13 +193,19 @@ class ScatteringModel(BaseScatteringModel):
     def propagate_free_space(self, E, z, f):
         if isinstance(E, (int, float)):
             E = np.full(self.shape, E)
-        
+
+        E = np.fft.ifft2(np.fft.fft2(E) * hl07.fresnel_transfer_function(self.q_mag, z, f))
+        return E
+
+    def propagate_free_space_impulse(self, E, z, f):
+        if isinstance(E, (int, float)):
+            E = np.full(self.shape, E)
+
         k = get_k(f)
         xx, yy = self.dr * (self.jj - self.Nc, self.ii - self.Nc)
-        # xx, yy = dr * (jj, ii)
         h = np.exp(1j*k*z)/(1j*get_wavelength(f)*z)*np.exp(1j*k/(2*z)*(xx**2+yy**2))
 
-        E = np.fft.ifft2(np.fft.fft2(E) * np.fft.fft2(h))
+        E = np.fft.ifft2(np.fft.fft2(E) * np.fft.fft2(h)) * self.dr**2
         return E
             
     def observer_electric_field(self, f):
@@ -174,7 +215,7 @@ class ScatteringModel(BaseScatteringModel):
                 dz = self.source.distance - self.screens[0].distance
             else:
                 dz = self.screens[idx].distance - self.screens[idx-1].distance
-                E = self.screens[idx].propagate_free_space(E, dz, f)
+            E = self.screens[idx].propagate_free_space(E, dz, f)
             E = self.screens[idx].propagate_phase_screen(E, f)
         E = self.propagate_free_space(E, self.screens[-1].distance, f)
         return E
@@ -200,3 +241,34 @@ class ScatteringModel(BaseScatteringModel):
 
     def observer_dynamic_spectrum(self, fmin, df, fchans):
         return self.observer_dynamic_spectrum_result(fmin, df, fchans).intensity
+
+    def observer_narrowband_tone_field(self, frequency, v_trans=None):
+        return make_narrowband_tone_field(
+            self,
+            frequency=frequency,
+            sample_count=self.N,
+            sample_spacing=self.dr,
+            row_index=self.Nc,
+            v_trans=v_trans,
+            metadata={
+                "model": "rd18",
+                "axis_order": "(observer_plane_r, tone_frequency)",
+            },
+        )
+
+    def observer_narrowband_tone_profile(self, frequency, intrinsic_intensity=1.0,
+                                         v_trans=None, normalize=None):
+        return make_narrowband_tone_profile(
+            self,
+            frequency=frequency,
+            sample_count=self.N,
+            sample_spacing=self.dr,
+            row_index=self.Nc,
+            intrinsic_intensity=intrinsic_intensity,
+            v_trans=v_trans,
+            normalize=normalize,
+            metadata={
+                "model": "rd18",
+                "axis_order": "(observer_plane_r, tone_frequency)",
+            },
+        )

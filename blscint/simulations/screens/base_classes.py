@@ -88,6 +88,72 @@ class DynamicSpectrum:
         return replace(self, time_axis=get_time_axis(self.spatial_axis, v_trans))
 
 
+@dataclass(frozen=True)
+class NarrowbandToneField:
+    """Complex observer-plane field for an intrinsically monochromatic tone.
+
+    ``electric_field`` is the propagated complex field sampled along one
+    observer-plane cut at a single tone frequency.  Its magnitude gives the
+    field gain, its phase gives the propagated carrier phase offset, and
+    ``abs(electric_field)**2`` gives the intensity profile for a unit-amplitude
+    tone.
+    """
+
+    electric_field: np.ndarray
+    frequency: u.Quantity
+    spatial_axis: u.Quantity
+    time_axis: Optional[u.Quantity] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def intensity(self):
+        return np.abs(self.electric_field) ** 2
+
+    @property
+    def phase(self):
+        return np.angle(self.electric_field)
+
+    def with_time_axis(self, v_trans):
+        """Return a copy with a time axis derived from transverse speed."""
+        return replace(self, time_axis=get_time_axis(self.spatial_axis, v_trans))
+
+    def as_dynamic_spectrum(self, intrinsic_intensity=1.0, normalize=None):
+        """Return the one-channel intensity profile for this tone."""
+        result = DynamicSpectrum(
+            intensity=float(intrinsic_intensity) * self.intensity[:, np.newaxis],
+            frequencies=np.array([self.frequency.to_value(u.Hz)]) * u.Hz,
+            spatial_axis=self.spatial_axis,
+            time_axis=self.time_axis,
+            metadata={
+                "signal": "perfect_narrowband_tone",
+                "intrinsic_intensity": float(intrinsic_intensity),
+                **dict(self.metadata),
+            },
+        )
+        return result.normalized(normalize)
+
+    def sample_voltage(self, times, spatial_index=None, amplitude=1.0, phase=0.0,
+                       analytic=False):
+        """Sample the propagated sine tone at one observer-plane point.
+
+        By default this returns the real passband voltage
+        ``Re[A E_obs exp(i (2 pi f t + phase))]``.  Set ``analytic=True`` to
+        return the complex analytic voltage instead.  For GHz tones, callers
+        should choose ``times`` consistently with whatever passband or baseband
+        convention they want to inspect.
+        """
+        if spatial_index is None:
+            spatial_index = len(self.electric_field) // 2
+        times = stg.cast_value(times, u.s)
+        arg = (2 * np.pi * self.frequency * times).decompose().value + phase
+        analytic_voltage = amplitude * self.electric_field[spatial_index] * np.exp(
+            1j * arg
+        )
+        if analytic:
+            return analytic_voltage
+        return np.real(analytic_voltage)
+
+
 def make_observer_dynamic_spectrum(model, fmin, df, fchans, sample_count,
                                    sample_spacing, row_index, v_trans=None,
                                    normalize=None, progress=True,
@@ -113,6 +179,48 @@ def make_observer_dynamic_spectrum(model, fmin, df, fchans, sample_count,
     if v_trans is not None:
         result = result.with_time_axis(v_trans)
     return result.normalized(normalize)
+
+
+def make_narrowband_tone_field(model, frequency, sample_count, sample_spacing,
+                               row_index, v_trans=None, metadata=None):
+    """Return the complex propagated field for a monochromatic tone."""
+    frequency = stg.cast_value(frequency, u.Hz)
+    field = model.observer_electric_field(frequency)[row_index]
+    result = NarrowbandToneField(
+        electric_field=field,
+        frequency=frequency,
+        spatial_axis=get_spatial_axis(sample_count, sample_spacing),
+        metadata=dict(metadata or {}),
+    )
+    if v_trans is not None:
+        result = result.with_time_axis(v_trans)
+    return result
+
+
+def make_narrowband_tone_profile(model, frequency, sample_count, sample_spacing,
+                                 row_index, intrinsic_intensity=1.0,
+                                 v_trans=None, normalize=None, metadata=None):
+    """Sample the scintillation gain for an intrinsically monochromatic tone.
+
+    A perfect sine tone has no intrinsic spectral envelope in this model.  The
+    returned ``DynamicSpectrum`` therefore has one frequency channel, and its
+    values are the observer-plane intensity profile at ``frequency``.  Downstream
+    spectrogram code can place that column into a chosen channel or convolve it
+    with an instrumental response.
+    """
+    field = make_narrowband_tone_field(
+        model,
+        frequency=frequency,
+        sample_count=sample_count,
+        sample_spacing=sample_spacing,
+        row_index=row_index,
+        v_trans=v_trans,
+        metadata=metadata,
+    )
+    return field.as_dynamic_spectrum(
+        intrinsic_intensity=intrinsic_intensity,
+        normalize=normalize,
+    )
 
 
 class BaseRadioSource(ABC):
