@@ -84,38 +84,54 @@ def query_ne2001(l, b, d, field=None):
         Specific output requested, or None if `field` is None
     """
     current_path = os.path.abspath(os.path.dirname(__file__))
-    exec_path = os.path.join(current_path, 'NE2001/bin.NE2001/run_NE2001.pl')
-    
-    cwd = os.getcwd()
-    try:
-        os.chdir(os.path.join(current_path, 'NE2001/bin.NE2001/'))
+    bin_path = os.path.join(current_path, 'NE2001/bin.NE2001/')
+    exec_path = os.path.join(bin_path, 'run_NE2001.pl')
+    ne2001_path = os.path.join(bin_path, 'NE2001')
 
-        if field is None:
-            field = 'ALL'
-        # Note: this suppresses floating-point exceptions (IEEE_UNDERFLOW_FLAG IEEE_DENORMAL)
-        output = subprocess.run(['./run_NE2001.pl',
-                                 str(l),
-                                 str(b), 
-                                 str(d), 
-                                 '-1', 
-                                 field],
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL).stdout.decode('utf-8')
-    except:
-        pass
-    finally:
-        os.chdir(cwd)
+    if not os.path.exists(ne2001_path):
+        src_path = os.path.join(current_path, 'NE2001/src.NE2001/')
+        raise FileNotFoundError(
+            f"NE2001 executable not found at {ne2001_path}. "
+            f"Build it from {src_path} with `make pgm` before querying NE2001."
+        )
+
+    if field is None:
+        field = 'ALL'
+    # Note: this suppresses floating-point exceptions (IEEE_UNDERFLOW_FLAG IEEE_DENORMAL)
+    proc = subprocess.run([exec_path,
+                           str(l),
+                           str(b),
+                           str(d),
+                           '-1',
+                           field],
+                          cwd=bin_path,
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE,
+                          text=True)
+    output = proc.stdout
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"NE2001 query failed for field {field!r} with return code "
+            f"{proc.returncode}: {proc.stderr.strip()}"
+        )
     
     if field == 'ALL':
         print(output)
         return
 
+    tokens = output.split()
+    if len(tokens) < 4:
+        raise RuntimeError(
+            f"NE2001 returned no parseable output for field {field!r}. "
+            f"Raw stdout: {output!r}; stderr: {proc.stderr.strip()!r}"
+        )
+
     # Get unit
-    unit = (output.split()[3].replace('pc-', 'pc.')
+    unit = (tokens[3].replace('pc-', 'pc.')
                              .replace('^{', '(')
                              .replace('}', ')'))
     unit = u.Unit(unit)
-    val = float(output.split()[2])
+    val = float(tokens[2])
     return val * unit
 
 
@@ -298,4 +314,3 @@ def get_fresnel(f, D, normalize=True):
     if normalize:
         l_f = np.sqrt(l_f / (2 * np.pi))
     return l_f
-

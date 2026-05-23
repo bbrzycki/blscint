@@ -8,6 +8,33 @@ jupyter-notebooks/*.png
 *.pickle
 *.h5
 
+# Generated scintillation analysis outputs. Existing tracked validation figures
+# remain tracked; promote new polished report figures with `git add -f` or move
+# them into a deliberate docs/report asset location.
+jupyter-notebooks/figures/*_metrics.json
+jupyter-notebooks/figures/acf_estimator_bias_analysis.png
+jupyter-notebooks/figures/fast_synthesis_acf_benchmark.png
+jupyter-notebooks/figures/gc_ne2001_timescale_comparison.png
+jupyter-notebooks/figures/screen_timescale_bridge*.png
+jupyter-notebooks/figures/setigen_screen_workflows.png
+jupyter-notebooks/figures/tone_method_comparison.png
+
+# Local exploratory notebooks/scripts from the screen-scintillation work. Keep
+# the curated bridge notebook visible; the ignored files stay available locally.
+jupyter-notebooks/generate_acf_estimator_bias_analysis.py
+jupyter-notebooks/generate_fast_synthesis_acf_benchmark.py
+jupyter-notebooks/generate_gc_ne2001_timescale_comparison.py
+jupyter-notebooks/generate_screen_timescale_bridge.py
+jupyter-notebooks/generate_setigen_workflow_figures.py
+jupyter-notebooks/generate_tone_method_comparison.py
+jupyter-notebooks/screen_acf_estimator_bias_analysis.ipynb
+jupyter-notebooks/screen_fast_synthesis_acf_benchmark.ipynb
+jupyter-notebooks/screen_gc_ne2001_timescale_comparison.ipynb
+jupyter-notebooks/screen_setigen_workflows.ipynb
+jupyter-notebooks/screen_tone_method_comparison.ipynb
+!jupyter-notebooks/build_screen_timescale_bridge_notebook.py
+!jupyter-notebooks/screen_timescale_bridge.ipynb
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *__pycache__/

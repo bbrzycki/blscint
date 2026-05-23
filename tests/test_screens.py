@@ -3,18 +3,25 @@ from pathlib import Path
 
 import numpy as np
 from astropy import units as u
+import setigen as stg
 
 
 # Import the screen package directly so these tests do not depend on optional
 # top-level blscint conveniences or observation-planning dependencies.
 sys.path.insert(0, str(Path(__file__).parents[1] / "blscint" / "simulations"))
 
-from screens import c95, hl07, rd18  # noqa: E402
-from screens.base_classes import DynamicSpectrum, get_frequency_axis, get_spatial_axis  # noqa: E402
+from screens import c95, hl07, rd18, setigen_bridge, voltage  # noqa: E402
+from screens.base_classes import (  # noqa: E402
+    DynamicSpectrum,
+    ElectricFieldSpectrum,
+    get_frequency_axis,
+    get_spatial_axis,
+)
 from screens.power_law import (  # noqa: E402
     C_n2_from_m_b2,
     C_n2_from_density_rms,
     C_n2_from_scattering_measure,
+    PowerLawPhaseScreen,
     ScatteringStrengthSpectrum,
     ThinScreenSpectrum,
     density_rms_from_C_n2,
@@ -26,6 +33,35 @@ from screens.power_law import (  # noqa: E402
     phase_from_electron_density,
     scattering_measure_from_C_n2,
 )
+
+
+def _small_c95_model(shape=(8, 8)):
+    source = c95.RadioSource(2e13 * u.cm)
+    screen = c95.Screen(
+        distance=1e13 * u.cm,
+        dx=1e9 * u.cm,
+        dy=1e9 * u.cm,
+        dz=1e12 * u.cm,
+        shape=shape,
+        m_b2=0.1,
+        seed=1,
+    )
+    return c95.ScatteringModel(
+        source,
+        [screen],
+        dx=1e9 * u.cm,
+        dy=1e9 * u.cm,
+        shape=shape,
+    )
+
+
+def _constant_transfer(value, sample_count=4, frequency_count=8):
+    return ElectricFieldSpectrum(
+        electric_field=np.full((sample_count, frequency_count), value, dtype=np.complex128),
+        frequencies=(1 * u.GHz + np.linspace(-4, 4, frequency_count) * u.kHz),
+        spatial_axis=get_spatial_axis(sample_count, 10 * u.cm),
+        time_axis=np.linspace(0, sample_count - 1, sample_count) * u.s,
+    )
 
 
 def test_dynamic_spectrum_axes_and_normalization():
@@ -44,6 +80,22 @@ def test_dynamic_spectrum_axes_and_normalization():
     assert normalized.time_axis.unit.is_equivalent(u.s)
 
 
+def test_electric_field_spectrum_normalization_and_dynamic_conversion():
+    field = ElectricFieldSpectrum(
+        electric_field=np.array([[1 + 1j, 2 + 0j], [0.5 + 0j, 1j]]),
+        frequencies=get_frequency_axis(1 * u.GHz, 1 * u.kHz, 2),
+        spatial_axis=get_spatial_axis(2, 10 * u.cm),
+    )
+
+    normalized = field.normalized("mean").with_time_axis(5 * u.cm / u.s)
+    ds = normalized.as_dynamic_spectrum(intrinsic_intensity=2.0)
+
+    assert np.isclose(np.mean(normalized.intensity), 1.0)
+    assert np.allclose(ds.intensity, 2.0 * normalized.intensity)
+    assert normalized.phase.shape == field.electric_field.shape
+    assert normalized.time_axis.unit.is_equivalent(u.s)
+
+
 def test_fresnel_matches_angular_spectrum_in_paraxial_limit():
     q_mag = np.array([0.0, 1e-5, 2e-5]) / u.cm
     fresnel = hl07.fresnel_transfer_function(q_mag, 1e5 * u.cm, 1 * u.GHz)
@@ -53,23 +105,7 @@ def test_fresnel_matches_angular_spectrum_in_paraxial_limit():
 
 
 def test_c95_dynamic_spectrum_result_smoke():
-    source = c95.RadioSource(2e13 * u.cm)
-    screen = c95.Screen(
-        distance=1e13 * u.cm,
-        dx=1e9 * u.cm,
-        dy=1e9 * u.cm,
-        dz=1e12 * u.cm,
-        shape=(8, 8),
-        m_b2=0.1,
-        seed=1,
-    )
-    model = c95.ScatteringModel(
-        source,
-        [screen],
-        dx=1e9 * u.cm,
-        dy=1e9 * u.cm,
-        shape=(8, 8),
-    )
+    model = _small_c95_model()
 
     ds = model.observer_dynamic_spectrum_result(
         1 * u.GHz,
@@ -86,24 +122,51 @@ def test_c95_dynamic_spectrum_result_smoke():
     assert ds.time_axis.unit.is_equivalent(u.s)
 
 
-def test_c95_narrowband_tone_profile_matches_single_channel_dynamic_spectrum():
-    source = c95.RadioSource(2e13 * u.cm)
-    screen = c95.Screen(
+def test_c95_field_spectrum_matches_dynamic_spectrum_result():
+    model = _small_c95_model()
+
+    field = model.observer_field_spectrum_result(
+        get_frequency_axis(1 * u.GHz, 1 * u.kHz, 3),
+        v_trans=1e6 * u.cm / u.s,
+        normalize="mean",
+        progress=False,
+    )
+    ds = model.observer_dynamic_spectrum_result(
+        1 * u.GHz,
+        1 * u.kHz,
+        3,
+        v_trans=1e6 * u.cm / u.s,
+        normalize="mean",
+        progress=False,
+    )
+
+    assert field.electric_field.shape == (8, 3)
+    assert np.allclose(field.intensity, ds.intensity)
+    assert field.time_axis.unit.is_equivalent(u.s)
+
+
+def test_power_law_subharmonics_are_stable_between_evaluations():
+    spectrum = ScatteringStrengthSpectrum(
+        m_b2=1.0,
         distance=1e13 * u.cm,
-        dx=1e9 * u.cm,
-        dy=1e9 * u.cm,
         dz=1e12 * u.cm,
-        shape=(8, 8),
-        m_b2=0.1,
-        seed=1,
     )
-    model = c95.ScatteringModel(
-        source,
-        [screen],
+    phase_screen = PowerLawPhaseScreen(
+        shape=(16, 16),
         dx=1e9 * u.cm,
         dy=1e9 * u.cm,
-        shape=(8, 8),
+        seed=5,
+        subharmonic_levels=1,
     )
+
+    first = phase_screen.phases(spectrum, 1 * u.GHz)
+    second = phase_screen.phases(spectrum, 1 * u.GHz)
+
+    assert np.allclose(first, second)
+
+
+def test_c95_narrowband_tone_profile_matches_single_channel_dynamic_spectrum():
+    model = _small_c95_model()
 
     profile = model.observer_narrowband_tone_profile(
         1 * u.GHz,
@@ -156,6 +219,148 @@ def test_c95_narrowband_tone_profile_matches_single_channel_dynamic_spectrum():
         field.intensity[spatial_index],
         rtol=1e-12,
     )
+
+
+def test_setigen_bridge_frame_gain_and_signal_injection():
+    model = _small_c95_model()
+    frame = stg.Frame.from_data(
+        df=1 * u.kHz,
+        dt=1 * u.s,
+        fch1=1 * u.GHz,
+        ascending=True,
+        data=np.ones((4, 3)),
+    )
+
+    gain = setigen_bridge.screen_gain_for_frame(
+        model,
+        frame,
+        v_trans=1e6 * u.cm / u.s,
+        normalize="mean",
+        progress=False,
+    )
+    scintillated = setigen_bridge.scintillate_frame(frame, gain=gain, in_place=False)
+
+    assert gain.intensity.shape == frame.data.shape
+    assert np.allclose(frame.data, 1.0)
+    assert np.allclose(scintillated.frame.data, gain.intensity)
+    assert scintillated.frame.metadata["blscint_scintillation"]["operation"] == "scintillate_frame"
+
+    clean_signal = np.full(frame.data.shape, 2.0)
+    injected = setigen_bridge.add_scintillated_signal(
+        frame,
+        clean_signal,
+        gain=gain,
+        in_place=False,
+    )
+
+    assert np.allclose(injected.scintillated_signal, 2.0 * gain.intensity)
+    assert np.allclose(injected.frame.data, frame.data + injected.scintillated_signal)
+    assert np.allclose(frame.data, 1.0)
+
+
+def test_setigen_bridge_voltage_stream_injection_matches_callable():
+    model = _small_c95_model()
+    stream = stg.voltage.DataStream(
+        sample_rate=8 * u.GHz,
+        fch1=0 * u.Hz,
+        ascending=True,
+        seed=1,
+    )
+
+    result = setigen_bridge.add_scintillated_voltage_signal(
+        stream,
+        model,
+        f_start=1 * u.GHz,
+        v_trans=1e6 * u.cm / u.s,
+        level=2.0,
+        normalize="mean",
+    )
+    stream.set_time(0)
+    samples = stream.get_samples(16)
+    times = np.linspace(0, 16 * stream.dt, 16, endpoint=False)
+    expected = result.signal_functions[0](times)
+
+    assert len(result.streams) == 1
+    assert result.field.time_axis.unit.is_equivalent(u.s)
+    assert samples.shape == (16,)
+    assert np.all(np.isfinite(samples))
+    assert np.allclose(samples, expected)
+
+
+def test_voltage_iq_propagation_applies_constant_complex_transfer():
+    transfer = _constant_transfer(0.5 + 0.25j)
+    rng = np.random.default_rng(10)
+    samples = (
+        rng.standard_normal((2, 128))
+        + 1j * rng.standard_normal((2, 128))
+    )
+
+    result = voltage.propagate_iq(
+        samples,
+        transfer,
+        sample_rate=8 * u.kHz,
+        center_frequency=1 * u.GHz,
+        axis=-1,
+        block_size=32,
+    )
+
+    assert result.samples.shape == samples.shape
+    assert result.frequency_axis.unit.is_equivalent(u.Hz)
+    assert result.block_time_axis.unit.is_equivalent(u.s)
+    assert np.allclose(result.samples, samples * (0.5 + 0.25j), atol=1e-12)
+
+
+def test_voltage_real_propagation_can_return_analytic_samples():
+    transfer = _constant_transfer(np.exp(1j * 0.3), frequency_count=64)
+    sample_rate = 1024 * u.Hz
+    times = np.arange(1024) / sample_rate.to_value(u.Hz)
+    real_voltage = np.cos(2 * np.pi * 128 * times)
+
+    result = voltage.propagate_real_voltage(
+        real_voltage,
+        transfer,
+        sample_rate=sample_rate,
+        reference_frequency=1 * u.GHz,
+        output="analytic",
+        block_size=128,
+        window="rectangular",
+    )
+    expected = voltage.analytic_signal(real_voltage) * np.exp(1j * 0.3)
+
+    assert result.samples.shape == real_voltage.shape
+    assert result.input_was_real
+    assert np.iscomplexobj(result.samples)
+    assert np.allclose(result.samples, expected, atol=1e-12)
+
+
+def test_setigen_bridge_post_generation_voltage_propagation_supports_antenna_shape():
+    transfer = _constant_transfer(2.0 + 0j, frequency_count=64)
+    stream = stg.voltage.DataStream(
+        sample_rate=1024 * u.Hz,
+        fch1=1 * u.GHz,
+        ascending=True,
+        seed=1,
+    )
+    stream.add_constant_signal(
+        f_start=1 * u.GHz + 128 * u.Hz,
+        drift_rate=0 * u.Hz / u.s,
+        level=1.0,
+    )
+    samples = stream.get_samples(256)
+
+    result = setigen_bridge.propagate_setigen_voltage(
+        samples[np.newaxis, np.newaxis, :],
+        transfer=transfer,
+        sample_rate=stream.sample_rate * u.Hz,
+        fch1=stream.fch1 * u.Hz,
+        block_size=64,
+        output="analytic",
+        window="rectangular",
+    )
+    expected = voltage.analytic_signal(samples) * 2.0
+
+    assert result.samples.shape == (1, 1, 256)
+    assert np.allclose(result.samples[0, 0], expected, atol=1e-12)
 
 
 def test_rd18_dynamic_spectrum_result_smoke():

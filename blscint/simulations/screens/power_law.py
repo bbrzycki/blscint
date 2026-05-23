@@ -286,6 +286,7 @@ class PowerLawPhaseScreen:
         self._x = (np.arange(self.Nx) - self.Nx // 2) * self.dx
         self._y = (np.arange(self.Ny) - self.Ny // 2) * self.dy
         self._xx, self._yy = np.meshgrid(self._x, self._y)
+        self._subharmonic_modes = self._build_subharmonic_modes()
 
     def phases(self, spectrum, f, reference_scale=None, reference_dphi=1.0):
         """Generate a phase screen for a spectrum and optional D_phi target."""
@@ -309,6 +310,16 @@ class PowerLawPhaseScreen:
 
     def _subharmonic_phases(self, spectrum, f):
         phase = np.zeros(self.shape)
+        for qx, qy, dq_area, theta in self._subharmonic_modes:
+            q = (qx**2 + qy**2) ** 0.5
+            amp2 = spectrum.Phi(q, f) * dq_area
+            amp = float(np.sqrt(max(_quantity_value(amp2), 0)))
+            arg = (qx * self._xx + qy * self._yy).decompose().value + theta
+            phase += amp * np.cos(arg)
+        return phase
+
+    def _build_subharmonic_modes(self):
+        modes = []
         qx0 = 2 * np.pi / self.Lx
         qy0 = 2 * np.pi / self.Ly
         for level in range(1, int(self.subharmonic_levels) + 1):
@@ -321,13 +332,9 @@ class PowerLawPhaseScreen:
                         continue
                     qx = ix * qx_step
                     qy = iy * qy_step
-                    q = (qx**2 + qy**2) ** 0.5
-                    amp2 = spectrum.Phi(q, f) * dq_area
-                    amp = float(np.sqrt(max(_quantity_value(amp2), 0)))
                     theta = self.rng.uniform(0, 2 * np.pi)
-                    arg = (qx * self._xx + qy * self._yy).decompose().value + theta
-                    phase += amp * np.cos(arg)
-        return phase
+                    modes.append((qx, qy, dq_area, theta))
+        return modes
 
     def _structure_at_scale(self, phase, scale):
         scale = stg.cast_value(scale, u.cm).to_value(u.cm)

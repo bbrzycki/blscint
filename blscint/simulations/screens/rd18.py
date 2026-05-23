@@ -39,6 +39,7 @@ from .base_classes import (
     make_narrowband_tone_field,
     make_narrowband_tone_profile,
     make_observer_dynamic_spectrum,
+    make_observer_field_spectrum,
     BaseRadioSource,
     BasePhaseSpectrum,
     BaseScreen,
@@ -227,6 +228,23 @@ class ScatteringModel(BaseScatteringModel):
             fmin=fmin,
             df=df,
             fchans=fchans,
+            sample_count=self.N,
+            sample_spacing=self.dr,
+            row_index=self.Nc,
+            v_trans=v_trans,
+            normalize=normalize,
+            progress=progress,
+            metadata={
+                "model": "rd18",
+                "axis_order": "(observer_plane_r, frequency)",
+            },
+        )
+
+    def observer_field_spectrum_result(self, frequencies, v_trans=None,
+                                       normalize=None, progress=True):
+        return make_observer_field_spectrum(
+            self,
+            frequencies=frequencies,
             sample_count=self.N,
             sample_spacing=self.dr,
             row_index=self.Nc,

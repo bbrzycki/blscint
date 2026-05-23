@@ -89,6 +89,64 @@ class DynamicSpectrum:
 
 
 @dataclass(frozen=True)
+class ElectricFieldSpectrum:
+    """Complex observer-plane field sampled over time/space and frequency.
+
+    The array convention is ``electric_field[spatial_or_time, frequency]``.
+    ``abs(electric_field)**2`` is the intensity dynamic spectrum for a
+    unit-intensity source.  Keeping the complex field is useful for voltage
+    simulations because it preserves the propagated phase offset as well as the
+    scalar gain.
+    """
+
+    electric_field: np.ndarray
+    frequencies: u.Quantity
+    spatial_axis: u.Quantity
+    time_axis: Optional[u.Quantity] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def intensity(self):
+        return np.abs(self.electric_field) ** 2
+
+    @property
+    def phase(self):
+        return np.angle(self.electric_field)
+
+    def normalized(self, mode="mean"):
+        """Return a copy whose intensity is normalized as a gain field."""
+        if mode in (None, False, "none"):
+            return self
+        if mode == "mean":
+            scale = np.nanmean(self.intensity)
+        elif mode == "median":
+            scale = np.nanmedian(self.intensity)
+        else:
+            raise ValueError("normalization mode must be 'mean', 'median', or 'none'")
+        if not np.isfinite(scale) or scale == 0:
+            raise ValueError("cannot normalize electric field with zero or non-finite intensity scale")
+        return replace(self, electric_field=self.electric_field / np.sqrt(scale))
+
+    def with_time_axis(self, v_trans):
+        """Return a copy with a time axis derived from transverse speed."""
+        return replace(self, time_axis=get_time_axis(self.spatial_axis, v_trans))
+
+    def as_dynamic_spectrum(self, intrinsic_intensity=1.0, normalize=None):
+        """Return the corresponding intensity dynamic spectrum."""
+        result = DynamicSpectrum(
+            intensity=float(intrinsic_intensity) * self.intensity,
+            frequencies=self.frequencies,
+            spatial_axis=self.spatial_axis,
+            time_axis=self.time_axis,
+            metadata={
+                "intrinsic_intensity": float(intrinsic_intensity),
+                **dict(self.metadata),
+            },
+        )
+        return result.normalized(normalize)
+
+
+@dataclass(frozen=True)
 class NarrowbandToneField:
     """Complex observer-plane field for an intrinsically monochromatic tone.
 
@@ -164,14 +222,32 @@ def make_observer_dynamic_spectrum(model, fmin, df, fchans, sample_count,
     downstream code one common result object for voltage-domain and
     spectrogram-domain workflows.
     """
-    frequencies = get_frequency_axis(fmin, df, fchans)
-    complex_spectrum = np.zeros((int(sample_count), int(fchans)), dtype=np.complex128)
-    iterator = tqdm(np.arange(int(fchans)), disable=not progress)
+    return make_observer_field_spectrum(
+        model,
+        frequencies=get_frequency_axis(fmin, df, fchans),
+        sample_count=sample_count,
+        sample_spacing=sample_spacing,
+        row_index=row_index,
+        v_trans=v_trans,
+        normalize=normalize,
+        progress=progress,
+        metadata=metadata,
+    ).as_dynamic_spectrum()
+
+
+def make_observer_field_spectrum(model, frequencies, sample_count, sample_spacing,
+                                 row_index, v_trans=None, normalize=None,
+                                 progress=True, metadata=None):
+    """Sample ``model.observer_electric_field`` into a complex field spectrum."""
+    frequencies = stg.cast_value(frequencies, u.Hz)
+    frequencies = np.atleast_1d(frequencies.to_value(u.Hz)) * u.Hz
+    complex_spectrum = np.zeros((int(sample_count), len(frequencies)), dtype=np.complex128)
+    iterator = tqdm(np.arange(len(frequencies)), disable=not progress)
     for idx in iterator:
         complex_spectrum[:, idx] = model.observer_electric_field(frequencies[idx])[row_index]
 
-    result = DynamicSpectrum(
-        intensity=np.abs(complex_spectrum)**2,
+    result = ElectricFieldSpectrum(
+        electric_field=complex_spectrum,
         frequencies=frequencies,
         spatial_axis=get_spatial_axis(sample_count, sample_spacing),
         metadata=dict(metadata or {}),

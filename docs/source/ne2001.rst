@@ -3,5 +3,10 @@ Estimating scattering scales with NE2001
 
 :code:`blscint` provides a host of functions to help get a sense of the 
 expected scattering scales for your observing targets, based on the NE2001 
-free electon density model from Cordes & Lazio 2002. 
+free electron density model from Cordes & Lazio 2002. 
 
+The local helper wraps the original Fortran NE2001 executable through
+``blscint.ne2001.NE2001/bin.NE2001/run_NE2001.pl``.  If
+``query_ne2001`` raises a missing-executable error, build the Fortran program
+from ``blscint/ne2001/NE2001/src.NE2001`` with ``make pgm`` before sampling
+NE2001-derived quantities.
